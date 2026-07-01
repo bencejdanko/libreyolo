@@ -468,6 +468,11 @@ MODEL_CATALOG = [
     ("picodet", "s", "LibrePICODETs.pt"),
     ("picodet", "m", "LibrePICODETm.pt"),
     ("picodet", "l", "LibrePICODETl.pt"),
+    ("yolo26", "n", "LibreYOLO26n.pt"),
+    ("yolo26", "s", "LibreYOLO26s.pt"),
+    ("yolo26", "m", "LibreYOLO26m.pt"),
+    ("yolo26", "l", "LibreYOLO26l.pt"),
+    ("yolo26", "x", "LibreYOLO26x.pt"),
 ]
 
 FLAGSHIP_FAMILIES = {"yolo9", "rfdetr"}
@@ -502,6 +507,7 @@ GENERAL_NIGHTLY_INFERENCE_MODELS = [
 YOLOX_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "yolox"]
 YOLO9_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "yolo9"]
 YOLO9E2E_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "yolo9_e2e"]
+YOLO26_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "yolo26"]
 YOLONAS_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "yolonas"]
 RFDETR_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "rfdetr"]
 DFINE_SIZES = [s for f, s, _ in MODEL_CATALOG if f == "dfine"]

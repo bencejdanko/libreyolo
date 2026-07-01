@@ -42,7 +42,7 @@ from ..utils.video import collect_video_results, is_video_file, run_video_infere
 logger = logging.getLogger(__name__)
 
 ImageSize = Union[int, Tuple[int, int]]
-_RECTANGULAR_BACKEND_FAMILIES = {"yolo9", "yolo9_e2e"}
+_RECTANGULAR_BACKEND_FAMILIES = {"yolo9", "yolo9_e2e", "yolo26"}
 
 # Families removed from LibreYOLO. An exported artifact whose metadata still names
 # one of these must fail loudly instead of being silently parsed as YOLO9.
@@ -222,9 +222,9 @@ def _is_nms_free_family(model_family: Optional[str]) -> bool:
         "ec",
         "rfdetr",
         "rtdetr",
-        "rtdetrv2",
         "rtdetrv4",
         "yolo9_e2e",
+        "yolo26",
     }
 
 

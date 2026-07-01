@@ -46,6 +46,7 @@ _METADATA_CONVERSION_HELP = (
 # matches, so the E2E discriminator (one2one_cv2 / one2one_cv3) must win first.
 from .ec.model import LibreEC  # noqa: E402
 from .yolox.model import LibreYOLOX  # noqa: E402
+from .yolo26.model import LibreYOLO26  # noqa: E402
 from .yolo9_e2e.model import LibreYOLO9E2E  # noqa: E402
 from .yolo9.model import LibreYOLO9  # noqa: E402
 from .yolonas.model import LibreYOLONAS  # noqa: E402

@@ -7,6 +7,7 @@ from pathlib import Path as _Path
 from .models import (
     LibreYOLO,
     LibreYOLOX,
+    LibreYOLO26,
     LibreYOLO9,
     LibreYOLO9E2E,
     LibreYOLONAS,
