@@ -1,6 +1,6 @@
-"""LibreYOLO26 wrapper: detect, segment, pose, obb, and classify tasks."""
-
 from __future__ import annotations
+import logging
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -9,6 +9,12 @@ import torch.nn as nn
 from ..base import BaseModel
 from ...tasks import normalize_task
 from ...validation.preprocessors import YOLO9E2EValPreprocessor
+from ...training.ddp_spawn import ddp_aware
+from ...utils.serialization import (
+    REQUIRED_CHECKPOINT_METADATA_KEYS,
+    validate_checkpoint_metadata,
+    load_untrusted_torch_file,
+)
 from .nn import (
     LibreYOLO26Model,
     LibreYOLO26SegModel,
@@ -19,6 +25,9 @@ from .nn import (
 from .utils import postprocess as _postprocess
 from .utils import preprocess_numpy as _preprocess_numpy
 from .config import YOLO26Config
+
+logger = logging.getLogger(__name__)
+_TRAIN_DEFAULTS = YOLO26Config()
 
 
 class LibreYOLO26(BaseModel):
@@ -172,9 +181,222 @@ class LibreYOLO26(BaseModel):
         return LibreYOLO9._preprocess(self, image, color_format=color_format, **kwargs)
 
     def _forward(self, x: torch.Tensor, epoch=None, max_epochs=None) -> Any:
-        if self.training:
+        if self.model.training:
             return self.model(x, epoch=epoch, max_epochs=max_epochs)
         return self.model(x)
 
     def _postprocess(self, raw, conf_thres: float, iou_thres: float, **kwargs):
         return _postprocess(raw, conf_thres, iou_thres, **kwargs)
+
+    @ddp_aware()
+    def train(
+        self,
+        data: str,
+        *,
+        epochs: int = _TRAIN_DEFAULTS.epochs,
+        batch: int = _TRAIN_DEFAULTS.batch,
+        imgsz: int = _TRAIN_DEFAULTS.imgsz,
+        lr0: float = _TRAIN_DEFAULTS.lr0,
+        optimizer: str = _TRAIN_DEFAULTS.optimizer,
+        device: str = "",
+        workers: int = _TRAIN_DEFAULTS.workers,
+        seed: int = _TRAIN_DEFAULTS.seed,
+        project: str = _TRAIN_DEFAULTS.project,
+        name: str = _TRAIN_DEFAULTS.name,
+        exist_ok: bool = _TRAIN_DEFAULTS.exist_ok,
+        resume: bool = _TRAIN_DEFAULTS.resume,
+        amp: bool = _TRAIN_DEFAULTS.amp,
+        patience: int = _TRAIN_DEFAULTS.patience,
+        allow_download_scripts: bool = False,
+        pretrained: bool | str | Path | None = None,
+        callbacks=None,
+        loggers=None,
+        **kwargs,
+    ) -> dict:
+        """Train the YOLO26 model on a dataset."""
+        from .trainer import YOLO26Trainer
+        from libreyolo.data import load_data_config
+
+        try:
+            data_config = load_data_config(
+                data,
+                autodownload=True,
+                allow_scripts=allow_download_scripts,
+            )
+            data = data_config.get("yaml_file", data)
+        except Exception as e:
+            raise FileNotFoundError(f"Failed to load dataset config '{data}': {e}")
+
+        yaml_nc = data_config.get("nc")
+        yaml_names = data_config.get("names")
+
+        # If no nc in data.yaml, infer it by counting.
+        if yaml_nc is None and yaml_names is not None:
+            yaml_nc = len(yaml_names)
+        if yaml_nc is not None:
+            yaml_nc = int(yaml_nc)
+
+        if yaml_nc is not None and yaml_nc != self.nb_classes:
+            self._rebuild_for_new_classes(yaml_nc)
+
+        # Apply custom class names from data config
+        if yaml_names is not None:
+            if isinstance(yaml_names, list):
+                yaml_names = {i: n for i, n in enumerate(yaml_names)}
+            self.names = self._sanitize_names(yaml_names, self.nb_classes)
+
+        if resume and pretrained:
+            raise ValueError("pretrained transfer cannot be combined with resume=True.")
+
+        if pretrained:
+            transfer_weights: str | Path
+            if pretrained is True:
+                transfer_weights = self._default_transfer_weights_name()
+            else:
+                transfer_weights = pretrained
+            stats = self._load_transfer_weights(transfer_weights)
+            logger.info(
+                "Loaded %d transfer tensors from %s; skipped %d incompatible tensors.",
+                stats["loaded"],
+                transfer_weights,
+                stats["skipped"],
+            )
+
+        if seed >= 0:
+            import random
+            import numpy as np
+
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if str(device).lower() not in ("cpu", "mps") and torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+        trainer_kwargs = dict(
+            model=self.model,
+            wrapper_model=self,
+            size=self.size,
+            num_classes=self.nb_classes,
+            data=data,
+            epochs=epochs,
+            batch=batch,
+            imgsz=imgsz,
+            lr0=lr0,
+            optimizer=optimizer.lower(),
+            device=device if device else "auto",
+            workers=workers,
+            seed=seed,
+            project=project,
+            name=name,
+            exist_ok=exist_ok,
+            resume=resume,
+            amp=amp,
+            patience=patience,
+            allow_download_scripts=allow_download_scripts,
+            callbacks=callbacks,
+            loggers=loggers,
+            **kwargs,
+        )
+        trainer = YOLO26Trainer(**trainer_kwargs)
+
+        if resume:
+            if not self.model_path:
+                raise ValueError(
+                    "resume=True requires a checkpoint. Load one first: "
+                    "model = LibreYOLO26('path/to/last.pt', size='t'); model.train(data=..., resume=True)"
+                )
+            trainer.setup()
+            trainer.resume(str(self.model_path))
+
+        results = trainer.train()
+
+        self._restore_after_training(results)
+
+        return results
+
+    def _default_transfer_weights_name(self) -> str:
+        """Return the matching detect checkpoint filename for transfer learning."""
+        return f"{self.FILENAME_PREFIX}{self.size}{self.WEIGHT_EXT}"
+
+    def _load_transfer_weights(self, weights: str | Path) -> dict[str, int]:
+        """Partially load same-family weights for training initialization."""
+        path = Path(self._resolve_weights_path(str(weights)))
+        if not path.exists():
+            from ...utils.download import download_weights
+
+            download_weights(str(path), self.size)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Transfer weights not found at {weights}")
+
+        loaded = load_untrusted_torch_file(
+            str(path),
+            map_location="cpu",
+            context="transfer weights",
+        )
+        if isinstance(loaded, dict):
+            metadata_keys = set(REQUIRED_CHECKPOINT_METADATA_KEYS) - {"model"}
+            if metadata_keys & set(loaded):
+                metadata_errors = validate_checkpoint_metadata(loaded, strict=False)
+                if metadata_errors:
+                    raise RuntimeError(
+                        "Transfer checkpoint metadata is incomplete: "
+                        + "; ".join(metadata_errors)
+                    )
+
+            ckpt_family = loaded.get("model_family", "")
+            if ckpt_family and ckpt_family != self._get_model_name():
+                raise RuntimeError(
+                    f"Transfer checkpoint model_family='{ckpt_family}' does not "
+                    f"match '{self._get_model_name()}'."
+                )
+
+            ckpt_task = loaded.get("task")
+            if ckpt_task is not None:
+                normalized_ckpt_task = normalize_task(ckpt_task)
+                if normalized_ckpt_task != self.task and normalized_ckpt_task != "detect":
+                    raise RuntimeError(
+                        f"Transfer checkpoint task='{normalized_ckpt_task}' is "
+                        f"not compatible with task='{self.task}'."
+                    )
+
+            if "model" in loaded:
+                state_dict = loaded["model"]
+            elif "state_dict" in loaded:
+                state_dict = loaded["state_dict"]
+            else:
+                state_dict = loaded
+        else:
+            state_dict = loaded
+
+        state_dict = self._prepare_state_dict(self._strip_ddp_prefix(state_dict))
+        total_tensors = len(state_dict)
+
+        current = self.model.state_dict()
+        matched = {
+            key: value
+            for key, value in state_dict.items()
+            if key in current and current[key].shape == value.shape
+        }
+        current.update(matched)
+        self.model.load_state_dict(current, strict=True)
+        self.model.to(self.device)
+        return {
+            "loaded": len(matched),
+            "skipped": max(total_tensors - len(matched), 0),
+        }
+
+    def _restore_after_training(self, results: dict) -> None:
+        """Reload the saved checkpoint and leave the model ready for inference."""
+        checkpoint = None
+        for key in ("best_checkpoint", "last_checkpoint"):
+            path = results.get(key)
+            if path and Path(path).exists():
+                checkpoint = str(path)
+                break
+
+        if checkpoint is not None:
+            self.model_path = checkpoint
+            self._load_weights(checkpoint)
+
+        self.model.to(self.device).eval()

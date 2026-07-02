@@ -142,6 +142,6 @@ class YOLO26Trainer(BaseTrainer):
         return self.model(
             imgs,
             targets=targets,
-            epoch=self.epoch,
+            epoch=self.current_epoch,
             max_epochs=self.config.epochs
         )

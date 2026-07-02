@@ -247,8 +247,6 @@ class YOLO26Detect(nn.Module):
     dynamic = False
     export = False
     shape = None
-    anchors = torch.empty(0)
-    strides = torch.empty(0)
 
     def __init__(self, nc=80, ch=(), stride=(), use_group=True):
         super().__init__()
@@ -257,6 +255,12 @@ class YOLO26Detect(nn.Module):
         self.no = nc + 4
         self.stride = torch.tensor(stride) if stride else torch.zeros(self.nl)
         self._loss_fn = None
+        # Register as non-persistent buffers so they don't appear in
+        # state_dict / EMA — they are dynamically recomputed per inference
+        # and storing them as persistent state causes EMA shape mismatch
+        # when validation populates them while the training model does not.
+        self.register_buffer("anchors", torch.empty(0), persistent=False)
+        self.register_buffer("strides", torch.empty(0), persistent=False)
 
         groups = 4 if use_group else 1
         hidden_box = [max(c // 4, 16) for c in ch]
